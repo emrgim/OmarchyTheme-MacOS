@@ -14,7 +14,7 @@ mkdir -p "$STATE_DIR"
 echo "==> venv + rumps"
 python3 -m venv venv
 ./venv/bin/pip install --quiet --upgrade pip
-./venv/bin/pip install --quiet rumps
+./venv/bin/pip install --quiet rumps pyobjc-framework-Quartz
 ./venv/bin/python -c "import rumps, otv_crypto; print('deps ok, rumps', rumps.__version__)"
 
 echo "==> LaunchAgent"
