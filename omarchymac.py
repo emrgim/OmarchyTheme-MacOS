@@ -7,6 +7,7 @@ omarchy-link and applies them to macOS.
 from __future__ import annotations
 
 import functools
+import os
 import threading
 
 import rumps
@@ -14,6 +15,7 @@ import rumps
 import otvmac_server as srv
 
 OFFSET_RANGE = range(-3, 4)  # menu shows -3..+3; application still wraps modulo the set size
+ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "omarchy-menu.png")
 
 
 def fmt_code(code: str) -> str:
@@ -22,7 +24,7 @@ def fmt_code(code: str) -> str:
 
 class OmarchyMacApp(rumps.App):
     def __init__(self):
-        super().__init__("OmarchyMac", title="◖◗", quit_button=None)
+        super().__init__("OmarchyMac", icon=ICON, template=True, quit_button=None)
         self.tv = srv.MacTV(name="MacLiber")
         self.httpd = srv.serve(self.tv)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -57,11 +59,11 @@ class OmarchyMacApp(rumps.App):
         tv = self.tv
         paired = list(tv.pcs.values())
         if tv.pairing_open:
-            self.title = f"◖ {fmt_code(tv.code)}"
+            self.title = f" {fmt_code(tv.code)}"
             self.i_code.title = f"Pairing code:  {fmt_code(tv.code)}"
             self.i_status.title = "Waiting to pair — enter the code on SuperOMI"
         else:
-            self.title = "◖◗"
+            self.title = None
             self.i_code.title = "Not in pairing mode"
             if paired:
                 names = ", ".join(p.get("name", "?") for p in paired)

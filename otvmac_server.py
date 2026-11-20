@@ -108,9 +108,9 @@ def accent_bucket(hex_color: str):
     return name, ACCENT_ENUM[name], 1
 
 
-def _run(cmd, timeout=15):
+def _run(cmd, timeout=15, env=None):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
         if p.returncode != 0:
             log(f"cmd failed ({p.returncode}): {' '.join(cmd)} :: {p.stderr.strip()[:200]}")
         return p.returncode == 0
@@ -123,14 +123,67 @@ def _osa(script, timeout=15):
     return _run(["osascript", "-e", script], timeout=timeout)
 
 
+IS_MAC = sys.platform == "darwin"
+
+
+def _gnome_env():
+    env = dict(os.environ)
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus")
+    return env
+
+
+def _gset(schema, key, value):
+    return _run(["gsettings", "set", schema, key, value], env=_gnome_env())
+
+
+def _gget(schema, key):
+    try:
+        p = subprocess.run(["gsettings", "get", schema, key], capture_output=True, text=True,
+                           timeout=10, env=_gnome_env())
+        return p.stdout.strip().strip("'")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+# Ubuntu Yaru accent variants (GTK + icon themes) installed on GNOME; an arbitrary
+# accent snaps to the nearest. Setting the Yaru accent theme also recolours folders.
+YARU_ACCENTS = {
+    "": "#e95420", "red": "#da3450", "magenta": "#b34cb3", "purple": "#7764d8",
+    "blue": "#0073e5", "prussiangreen": "#308280", "viridian": "#03875b",
+    "olive": "#4b8501", "sage": "#657b69", "bark": "#787859",
+}
+
+
+def yaru_accent(accent_hex: str) -> str:
+    r, g, b = _hex_rgb(accent_hex)
+    best, bestd = "", 1e18
+    for name, hx in YARU_ACCENTS.items():
+        rr, gg, bb = _hex_rgb(hx)
+        d = (r - rr) ** 2 + (g - gg) ** 2 + (b - bb) ** 2
+        if d < bestd:
+            best, bestd = name, d
+    return best
+
+
 def apply_mode(mode: str) -> None:
-    dark = "true" if mode == "dark" else "false"
-    _osa(f'tell application "System Events" to tell appearance preferences to set dark mode to {dark}')
+    if IS_MAC:
+        dark = "true" if mode == "dark" else "false"
+        _osa(f'tell application "System Events" to tell appearance preferences to set dark mode to {dark}')
+    else:
+        _gset("org.gnome.desktop.interface", "color-scheme",
+              "prefer-dark" if mode == "dark" else "default")
 
 
 def apply_accent(accent_hex: str) -> dict:
-    """Highlight colour gets the EXACT accent (arbitrary RGB is allowed there);
-    the system accent snaps to the nearest of macOS's fixed swatches."""
+    """macOS: exact highlight + nearest system-accent swatch.
+    GNOME/Ubuntu: nearest Yaru accent variant (recolours UI *and* folders)."""
+    if not IS_MAC:
+        name = yaru_accent(accent_hex)
+        dark = _gget("org.gnome.desktop.interface", "color-scheme") == "prefer-dark"
+        theme = "Yaru" + (f"-{name}" if name else "") + ("-dark" if dark else "")
+        _gset("org.gnome.desktop.interface", "gtk-theme", theme)
+        _gset("org.gnome.desktop.interface", "icon-theme", theme)
+        return {"accent_name": name or "orange", "yaru_theme": theme}
     r, g, b = _hex_rgb(accent_hex)
     name, enum, aqua = accent_bucket(accent_hex)
     # exact highlight (text selection) colour
@@ -155,7 +208,13 @@ def apply_accent(accent_hex: str) -> dict:
 
 def apply_wallpaper(path: Path) -> None:
     p = str(path)
-    _osa(f'tell application "System Events" to tell every desktop to set picture to "{p}"')
+    if IS_MAC:
+        _osa(f'tell application "System Events" to tell every desktop to set picture to "{p}"')
+    else:
+        uri = "file://" + p
+        _gset("org.gnome.desktop.background", "picture-uri", uri)
+        _gset("org.gnome.desktop.background", "picture-uri-dark", uri)
+        _gset("org.gnome.desktop.background", "picture-options", "zoom")
 
 
 # Standard macOS home folders to recolour (the "default" folders). Only those
@@ -167,9 +226,13 @@ FOLDER_BASE_HUE_DEG = 212.0  # the hue of the stock blue macOS folder
 
 def tint_folders(accent_hex: str, folders=None) -> dict:
     """Recolour the default folder icons to the theme accent by hue-rotating the
-    stock folder icon (CoreImage), then setting it via NSWorkspace. Best effort."""
+    stock folder icon (CoreImage), then setting it via NSWorkspace. Best effort.
+    On GNOME this is a no-op: the Yaru accent icon theme already recolours folders."""
     import math
     result = {"tinted": [], "failed": []}
+    if not IS_MAC:
+        result["note"] = "handled by the Yaru accent icon theme"
+        return result
     try:
         from AppKit import NSWorkspace, NSImage, NSBitmapImageRep, NSMakeSize
         from Quartz import CIImage, CIFilter, CIContext
@@ -641,14 +704,17 @@ class Handler(BaseHTTPRequestHandler):
 # ----------------------------------------------------------- mDNS advertise
 
 def advertise_mdns(tv: MacTV, port: int = PORT):
-    """Register _omarchytv._tcp via macOS dns-sd so omarchy-link can discover/relocate us."""
+    """Register _omarchytv._tcp (macOS dns-sd / Linux avahi) so omarchy-link can discover/relocate us."""
     txt = [f"v=1", f"id={tv.tv_id}", f"name={tv.name}", f"pair={'1' if tv.pairing_open else '0'}"]
-    cmd = ["dns-sd", "-R", tv.name, "_omarchytv._tcp", "local", str(port)] + txt
+    if IS_MAC:
+        cmd = ["dns-sd", "-R", tv.name, "_omarchytv._tcp", "local", str(port)] + txt
+    else:
+        cmd = ["avahi-publish-service", tv.name, "_omarchytv._tcp", str(port)] + txt
     try:
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 stdin=subprocess.DEVNULL)
     except OSError as e:
-        log(f"dns-sd advertise failed: {e}")
+        log(f"mDNS advertise failed: {e}")
         return None
 
 
