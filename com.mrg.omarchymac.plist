@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mrg.omarchymac</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/emilianomorgia/omarchy-mac-link/venv/bin/python</string>
+    <string>/Users/emilianomorgia/omarchy-mac-link/omarchymac.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/emilianomorgia/omarchy-mac-link</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>/Users/emilianomorgia/.config/omarchy-mac-link/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/emilianomorgia/.config/omarchy-mac-link/stderr.log</string>
+</dict>
+</plist>

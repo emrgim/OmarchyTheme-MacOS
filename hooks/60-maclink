@@ -1,0 +1,13 @@
+#!/bin/bash
+# Omarchy theme-set hook: push the new theme to the paired Mac (OmarchyMac),
+# using a SECOND omarchy-link instance whose state lives in its own XDG dirs so
+# the OmarchyTV pairing is untouched. Install at:
+#   ~/.config/omarchy/hooks/theme-set.d/60-maclink
+# Never fails the theme switch.
+root="$HOME/.local/share/omarchy-link"
+[[ -x $root/bin/omarchy-link ]] || exit 0
+detach=(); command -v setsid >/dev/null && detach=(setsid)
+XDG_CONFIG_HOME="$HOME/.config/omarchy-link-mac" \
+XDG_STATE_HOME="$HOME/.local/state/omarchy-link-mac" \
+  "${detach[@]}" "$root/bin/omarchy-link" sync-theme --quiet </dev/null >/dev/null 2>&1 &
+exit 0
