@@ -35,6 +35,10 @@ JSON_MAX = 64 * 1024
 JPEG_MAX = 8 * 1024 * 1024
 SKEW = 120
 PORT = 47800
+# Tailscale's own ranges, accepted like the LAN so a paired PC can push over the
+# tailnet (same policy OmarchyTV uses when its Tailscale switch is on).
+TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
+TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
 # Capabilities we honour. We deliberately do NOT advertise "enc-a256gcm", so the
 # PC stays on signed plaintext (no python-cryptography needed on macOS stock py3).
 CAPS = ["theme", "wallpaper"]
@@ -295,9 +299,14 @@ class Handler(BaseHTTPRequestHandler):
             ip = ipaddress.ip_address(self.client_address[0])
         except ValueError:
             ip = None
-        if ip is not None and (ip.is_loopback or ip.is_private or ip.is_link_local):
-            return True
-        self._json(403, {"error": "not_lan", "message": "LAN clients only"})
+        if ip is not None:
+            if ip.is_loopback or ip.is_private or ip.is_link_local:
+                return True
+            if ip.version == 4 and ip in TAILNET_V4:
+                return True
+            if ip.version == 6 and ip in TAILNET_V6:
+                return True
+        self._json(403, {"error": "not_lan", "message": "LAN or tailnet clients only"})
         return False
 
     def _json(self, status, obj, sign=None, extra=None):
