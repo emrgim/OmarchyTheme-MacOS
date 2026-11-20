@@ -398,14 +398,8 @@ class MacTV:
         return p
 
     def set_offset(self, n: int):
-        ws = self.wallset or {}
-        count = int(ws.get("count") or 0)
-        n = int(n)
-        if count:
-            # keep it in a readable range; application still uses modulo
-            n = ((n + (count - 1)) % count) - (count - 1) if n else 0
         with self.lock:
-            self.offset = n
+            self.offset = int(n)   # raw; effective_index() wraps it modulo the set size
             self._save_state()
         self.apply_effective_wallpaper()
         return self.offset
