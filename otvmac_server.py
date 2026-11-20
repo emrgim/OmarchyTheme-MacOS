@@ -158,6 +158,67 @@ def apply_wallpaper(path: Path) -> None:
     _osa(f'tell application "System Events" to tell every desktop to set picture to "{p}"')
 
 
+# Standard macOS home folders to recolour (the "default" folders). Only those
+# that exist are touched. ~/Desktop, Documents and Downloads are TCC-guarded and
+# may raise a one-time macOS privacy prompt.
+DEFAULT_FOLDERS = ["Desktop", "Documents", "Downloads", "Movies", "Music", "Pictures", "Public"]
+FOLDER_BASE_HUE_DEG = 212.0  # the hue of the stock blue macOS folder
+
+
+def tint_folders(accent_hex: str, folders=None) -> dict:
+    """Recolour the default folder icons to the theme accent by hue-rotating the
+    stock folder icon (CoreImage), then setting it via NSWorkspace. Best effort."""
+    import math
+    result = {"tinted": [], "failed": []}
+    try:
+        from AppKit import NSWorkspace, NSImage, NSBitmapImageRep, NSMakeSize
+        from Quartz import CIImage, CIFilter, CIContext
+    except Exception as e:  # not in a PyObjC process
+        log(f"tint_folders: AppKit/Quartz unavailable: {e}")
+        return result
+    r, g, b = (c / 255.0 for c in _hex_rgb(accent_hex))
+    import colorsys as _cs
+    h, s, v = _cs.rgb_to_hsv(r, g, b)
+    accent_deg = h * 360.0
+    angle = math.radians(accent_deg - FOLDER_BASE_HUE_DEG)
+    try:
+        ws = NSWorkspace.sharedWorkspace()
+        base = ws.iconForFileType_("public.folder")
+        base.setSize_(NSMakeSize(512, 512))
+        tiff = base.TIFFRepresentation()
+        rep = NSBitmapImageRep.imageRepWithData_(tiff)
+        ci = CIImage.alloc().initWithBitmapImageRep_(rep)
+        hue = CIFilter.filterWithName_("CIHueAdjust")
+        hue.setValue_forKey_(ci, "inputImage")
+        hue.setValue_forKey_(angle, "inputAngle")
+        out = hue.valueForKey_("outputImage")
+        if s < 0.18:  # near-grey accent: desaturate the folder instead of rotating
+            ctl = CIFilter.filterWithName_("CIColorControls")
+            ctl.setValue_forKey_(out, "inputImage")
+            ctl.setValue_forKey_(0.0, "inputSaturation")
+            out = ctl.valueForKey_("outputImage")
+        ctx = CIContext.contextWithOptions_(None)
+        ext = out.extent()
+        cg = ctx.createCGImage_fromRect_(out, ext)
+        img = NSImage.alloc().initWithCGImage_size_(cg, ext.size)
+    except Exception as e:
+        log(f"tint_folders: could not build icon: {e}")
+        return result
+    home = Path.home()
+    for name in (folders or DEFAULT_FOLDERS):
+        p = home / name
+        if not p.is_dir():
+            continue
+        try:
+            ok = ws.setIcon_forFile_options_(img, str(p), 0)
+            (result["tinted"] if ok else result["failed"]).append(name)
+        except Exception as e:
+            log(f"tint_folders: {name}: {e}")
+            result["failed"].append(name)
+    log(f"tint_folders accent={accent_hex} -> tinted {result['tinted']} failed {result['failed']}")
+    return result
+
+
 def apply_theme(payload: dict, wallpaper_path: Path | None) -> dict:
     mode = payload.get("mode", "dark")
     accent = payload.get("accent", "#7aa2f7")
@@ -176,6 +237,10 @@ def apply_theme(payload: dict, wallpaper_path: Path | None) -> dict:
             applied["wallpaper"] = str(wallpaper_path)
         except Exception as e:
             log(f"apply_wallpaper error: {e}")
+    try:
+        applied["folders"] = tint_folders(accent)
+    except Exception as e:
+        log(f"tint_folders error: {e}")
     log(f"applied theme '{payload.get('name')}' mode={mode} accent={accent} "
         f"-> system accent {applied.get('accent_name')} (enum {applied.get('accent_enum')})")
     return applied
