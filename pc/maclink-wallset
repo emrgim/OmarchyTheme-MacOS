@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""maclink-wallset: push the CURRENT Omarchy theme's full, ordered background
+set (plus which one is current) to the paired Mac (OmarchyMac), so the Mac can
+offset the wallpaper within the set. Runs on the Omarchy PC from the theme-set
+hook, using the Mac's dedicated omarchy-link state (XDG_* set by the hook).
+
+Reuses the installed omarchy-link library for crypto / signed client / wallpaper
+rendering — no new protocol, just extra images over the same Link endpoints.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+LIB = os.path.expanduser("~/.local/share/omarchy-link/lib")
+sys.path.insert(0, LIB)
+
+from omarchy_link import config, theme, client  # noqa: E402
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".jxl", ".gif", ".bmp",
+              ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi")
+QUIET = "--quiet" in sys.argv or "-q" in sys.argv
+
+
+def say(*a):
+    if not QUIET:
+        print(*a, flush=True)
+
+
+def main() -> int:
+    paired = config.read_json(config.PAIRING_FILE, {})
+    tv, pc_id = paired.get("tv"), paired.get("pcId")
+    if not tv or not pc_id:
+        say("maclink-wallset: no Mac pairing in", config.PAIRING_FILE)
+        return 1
+    cfg = config.load_config()
+
+    bg_dir = theme.theme_dir() / "backgrounds"
+    if not bg_dir.is_dir():
+        say("maclink-wallset: no backgrounds dir", bg_dir)
+        return 0
+    names = sorted(p.name for p in bg_dir.iterdir()
+                   if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+    if not names:
+        say("maclink-wallset: theme has no background images")
+        return 0
+
+    cur = theme.current_background()
+    cur_name = cur.name if cur else names[0]
+    current = names.index(cur_name) if cur_name in names else 0
+
+    cl = client.Client(tv, pc_id, not cfg.get("allowOtherSubnets"))
+    sent = 0
+    for i, nm in enumerate(names):
+        try:
+            jpeg, _ = theme.render_wallpaper(bg_dir / nm)
+            cl.request("PUT", f"/v1/wallset/{i}", raw=jpeg, content_type="image/jpeg", timeout=90)
+            sent += 1
+        except Exception as e:
+            say(f"maclink-wallset: image {i} ({nm}) failed: {e}")
+    try:
+        cl.request("PUT", "/v1/wallset", {
+            "theme": theme.theme_name(), "count": len(names), "current": current, "names": names})
+    except Exception as e:
+        say(f"maclink-wallset: finalize failed: {e}")
+        return 1
+    say(f"maclink-wallset: sent {sent}/{len(names)} images, current={current} ({cur_name})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

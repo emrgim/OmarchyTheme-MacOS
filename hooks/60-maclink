@@ -1,13 +1,17 @@
 #!/bin/bash
 # Omarchy theme-set hook: push the new theme to the paired Mac (OmarchyMac),
 # using a SECOND omarchy-link instance whose state lives in its own XDG dirs so
-# the OmarchyTV pairing is untouched. Install at:
+# the OmarchyTV pairing is untouched. Then push the theme's full background set
+# (maclink-wallset) so the Mac can offset the wallpaper. Install at:
 #   ~/.config/omarchy/hooks/theme-set.d/60-maclink
 # Never fails the theme switch.
 root="$HOME/.local/share/omarchy-link"
 [[ -x $root/bin/omarchy-link ]] || exit 0
+export XDG_CONFIG_HOME="$HOME/.config/omarchy-link-mac"
+export XDG_STATE_HOME="$HOME/.local/state/omarchy-link-mac"
 detach=(); command -v setsid >/dev/null && detach=(setsid)
-XDG_CONFIG_HOME="$HOME/.config/omarchy-link-mac" \
-XDG_STATE_HOME="$HOME/.local/state/omarchy-link-mac" \
-  "${detach[@]}" "$root/bin/omarchy-link" sync-theme --quiet </dev/null >/dev/null 2>&1 &
+"${detach[@]}" bash -c '
+  "'"$root"'/bin/omarchy-link" sync-theme --quiet
+  [ -x "$HOME/.local/bin/maclink-wallset" ] && python3 "$HOME/.local/bin/maclink-wallset" --quiet
+' </dev/null >/dev/null 2>&1 &
 exit 0

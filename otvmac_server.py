@@ -219,7 +219,9 @@ def tint_folders(accent_hex: str, folders=None) -> dict:
     return result
 
 
-def apply_theme(payload: dict, wallpaper_path: Path | None) -> dict:
+def apply_theme(payload: dict, wallpaper_path: Path | None = None) -> dict:
+    """Apply mode + accent + folder tint. Wallpaper is handled separately by
+    MacTV.apply_effective_wallpaper() so the wallpaper offset can shift it."""
     mode = payload.get("mode", "dark")
     accent = payload.get("accent", "#7aa2f7")
     applied = {"mode": mode, "accent": accent}
@@ -238,7 +240,7 @@ def apply_theme(payload: dict, wallpaper_path: Path | None) -> dict:
         except Exception as e:
             log(f"apply_wallpaper error: {e}")
     try:
-        applied["folders"] = tint_folders(accent)
+        applied["folders"] = tint_folders(accent)  # noqa
     except Exception as e:
         log(f"tint_folders error: {e}")
     log(f"applied theme '{payload.get('name')}' mode={mode} accent={accent} "
@@ -270,6 +272,8 @@ class MacTV:
         self.wallpaper_sha = st.get("wallpaperSha")
         self.last_theme = st.get("lastTheme")
         self.last_push_at = st.get("lastPushAt")
+        self.offset = int(st.get("wallpaperOffset", 0) or 0)   # Mac-side wallpaper shift
+        self.wallset = st.get("wallset")                       # {theme,count,current,names}
         self._save_secrets()
         self._save_state()
 
@@ -292,6 +296,7 @@ class MacTV:
             "code": self.code, "pairingOpen": self.pairing_open,
             "wallpaperSha": self.wallpaper_sha, "lastTheme": self.last_theme,
             "lastPushAt": self.last_push_at, "tvId": self.tv_id,
+            "wallpaperOffset": self.offset, "wallset": self.wallset,
             "paired": [{"name": p.get("name"), "address": p.get("address"), "lastSeen": p.get("lastSeen")}
                        for p in self.pcs.values()],
         }
@@ -337,17 +342,86 @@ class MacTV:
             self._save_state()
         return sha
 
+    # -------- wallpaper set + offset (the Mac can show a shifted image of the set)
+    def wallset_dir(self) -> Path:
+        d = self.dir / "wallset"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def store_wallset_image(self, index: int, jpeg: bytes) -> None:
+        (self.wallset_dir() / f"{int(index)}.jpg").write_bytes(jpeg)
+
+    def finalize_wallset(self, meta: dict):
+        names = [str(n) for n in (meta.get("names") or [])]
+        count = int(meta.get("count") or len(names))
+        current = int(meta.get("current") or 0)
+        with self.lock:
+            self.wallset = {"theme": str(meta.get("theme", ""))[:64],
+                            "count": max(0, count), "current": current % count if count else 0,
+                            "names": names, "at": int(time.time())}
+            self._save_state()
+        self.apply_effective_wallpaper()
+        return self.wallset
+
+    def effective_index(self):
+        ws = self.wallset
+        if not ws or not ws.get("count"):
+            return None
+        return (int(ws["current"]) + int(self.offset)) % int(ws["count"])
+
+    def effective_wallpaper_path(self) -> Path | None:
+        idx = self.effective_index()
+        if idx is not None:
+            p = self.wallset_dir() / f"{idx}.jpg"
+            if p.is_file():
+                return p
+        return self.wallpaper_path()
+
+    def apply_effective_wallpaper(self):
+        p = self.effective_wallpaper_path()
+        if not p:
+            return None
+        try:
+            apply_wallpaper(p)
+        except Exception as e:
+            log(f"apply_effective_wallpaper error: {e}")
+            return None
+        idx = self.effective_index()
+        with self.lock:
+            if isinstance(self.last_theme, dict):
+                self.last_theme.setdefault("applied", {})
+                self.last_theme["applied"]["wallpaper"] = str(p)
+                self.last_theme["applied"]["wallpaper_index"] = idx
+                self.last_theme["applied"]["offset"] = self.offset
+            self._save_state()
+        log(f"wallpaper -> {p.name} (offset {self.offset}, index {idx})")
+        return p
+
+    def set_offset(self, n: int):
+        ws = self.wallset or {}
+        count = int(ws.get("count") or 0)
+        n = int(n)
+        if count:
+            # keep it in a readable range; application still uses modulo
+            n = ((n + (count - 1)) % count) - (count - 1) if n else 0
+        with self.lock:
+            self.offset = n
+            self._save_state()
+        self.apply_effective_wallpaper()
+        return self.offset
+
     def receive_theme(self, payload: dict):
         colors = {k: v for k, v in (payload.get("colors") or {}).items() if HEX6.match(str(v))}
         theme = {"name": str(payload.get("name", ""))[:64], "mode": payload.get("mode", "dark"),
                  "accent": payload.get("accent"), "accent2": payload.get("accent2"),
                  "colors": colors, "at": int(time.time())}
-        applied = apply_theme(theme, self.wallpaper_path())
+        applied = apply_theme(theme)
         theme["applied"] = applied
         with self.lock:
             self.last_theme = theme
             self.last_push_at = int(time.time())
             self._save_state()
+        self.apply_effective_wallpaper()
         return theme
 
 
@@ -452,7 +526,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and path in ("/v1/pair/start", "/v1/pair/confirm"):
             body = self._read_body(JSON_MAX)
             return None if body is None else self._pair(path, body)
-        limit = JPEG_MAX if (method, path) == ("PUT", "/v1/wallpaper") else JSON_MAX
+        limit = (JPEG_MAX if (method == "PUT" and (path == "/v1/wallpaper" or path.startswith("/v1/wallset/")))
+                 else JSON_MAX)
         body = self._read_body(limit)
         if body is None:
             return
@@ -461,8 +536,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         pc_id, token, nonce = who
         sign = (token, nonce)
+        is_image = path == "/v1/wallpaper" or path.startswith("/v1/wallset/")
         try:
-            payload = json.loads(body) if body and path != "/v1/wallpaper" else {}
+            payload = json.loads(body) if body and not is_image else {}
         except ValueError:
             return self._json(400, {"error": "bad_json"}, sign)
         try:
@@ -490,6 +566,24 @@ class Handler(BaseHTTPRequestHandler):
                 return 409, {"error": "unknown_wallpaper", "message": "PUT /v1/wallpaper first"}
             tv.receive_theme(payload)
             return 200, {"ok": True}
+        if method == "PUT" and path.startswith("/v1/wallset/"):
+            try:
+                idx = int(path.rsplit("/", 1)[1])
+            except ValueError:
+                return 400, {"error": "bad_index"}
+            if self.headers.get("Content-Type") != "image/jpeg" or body[:3] != b"\xff\xd8\xff":
+                return 415, {"error": "not_jpeg"}
+            tv.store_wallset_image(idx, body)
+            return 200, {"ok": True, "index": idx}
+        if (method, path) == ("PUT", "/v1/wallset"):
+            tv.finalize_wallset(payload)
+            return 200, {"ok": True, "effective_index": tv.effective_index(), "offset": tv.offset}
+        if (method, path) == ("GET", "/v1/wallset"):
+            return 200, {"wallset": tv.wallset, "offset": tv.offset,
+                         "effective_index": tv.effective_index()}
+        if (method, path) == ("POST", "/v1/offset"):
+            tv.set_offset(int(payload.get("offset", 0)))
+            return 200, {"ok": True, "offset": tv.offset, "effective_index": tv.effective_index()}
         if (method, path) == ("POST", "/v1/unpair"):
             with tv.lock:
                 tv.pcs.pop(self._pc_id, None) if hasattr(self, "_pc_id") else None
